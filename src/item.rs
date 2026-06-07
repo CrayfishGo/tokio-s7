@@ -270,9 +270,9 @@ impl RequestItem {
 
         let (byte_address, bit_address) =
             if area == S7Area::S7Timers.code() || area == S7Area::S7Counters.code() {
-                ((raw_addr >> 2), 0u32)
+                (raw_addr >> 2, 0u32)
             } else {
-                ((raw_addr >> 3), (raw_addr & 0x07))
+                (raw_addr >> 3, (raw_addr & 0x07))
             };
 
         Ok(RequestItem {
@@ -373,6 +373,16 @@ impl DataItem {
             data_variable_type: S7DataVariableType::ByteWordDword,
             count: data.len() as u16,
             data,
+        })
+    }
+
+    pub fn create_req_bool(data: bool) -> Result<Self, S7Error> {
+        let byte_value = if data { 0x01u8 } else { 0x00u8 };
+        Ok(DataItem {
+            return_code: S7ReturnCode::Reserved,
+            data_variable_type: S7DataVariableType::Bit,
+            count: 1,
+            data: vec![byte_value],
         })
     }
 }

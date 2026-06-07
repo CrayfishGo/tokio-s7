@@ -16,17 +16,30 @@ async fn main() {
     let mut client = S7Client::new(config);
     client.connect().await.expect("连接失败");
 
-    client.write_float32("DB3.1", 133.45).await.unwrap();
-    let result = client.read_float32("DB3.1").await;
+    // client.write_float32("DB3.1", 133.45).await.unwrap();
+    // let result = client.read_float32("DB3.1").await;
+    // println!("{:#?}", result);
+    //
+    // client.write_string("DB1.0", 100, "hello, this is a test data").await;
+    // let result = client.read_string("DB1.0", 100).await;
+    // println!("{:#?}", result);
+    //
+    // client.write_wstring("DB2.STRING20", 50, "你好啊朋友").await;
+    // let result = client.read_wstring("DB2.STRING20", 50).await;
+    // println!("{:#?}", result);
+
+    client.write_bool("DB2.X32.2", true).await;
+    let result = client.read_bool("DB2.X32.2").await;
     println!("{:#?}", result);
 
-    client.write_string("DB1.0", 100, "hello, this is a test data").await;
-    let result = client.read_string("DB1.0", 100).await;
-    println!("{:#?}", result);
 
-    client.write_wstring("DB2.0", 50, "你好啊朋友").await;
-    let result = client.read_wstring("DB2.0", 50).await;
-    println!("{:#?}", result);
+    // client.write_int16("DB2.W282", 1345).await;
+    // let result = client.read_int16("DB2.W282").await;
+    // println!("{:#?}", result);
+    //
+    // client.write_float32("DB2.REAL224", 1345.34).await;
+    // let result = client.read_float32("DB2.REAL224").await;
+    // println!("{:#?}", result);
 
     ()
 }

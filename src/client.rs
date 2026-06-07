@@ -277,8 +277,6 @@ impl S7Client {
     pub async fn read_bool(&self, address: &str) -> Result<bool, S7Error> {
         let req_item = RequestItem::parse_bit(address)
             .map_err(|e| S7Error::Error(format!("Address parse error: {}", e)))?;
-        let bit_index = req_item.bit_address;
-
         let data_items = self.read(vec![req_item]).await?;
         let byte = data_items
             .first()
@@ -286,7 +284,7 @@ impl S7Client {
             .copied()
             .ok_or_else(|| S7Error::Error("read_bool: empty response".into()))?;
 
-        Ok((byte >> bit_index) & 0x01 == 1)
+        Ok(((byte & 0xFF) & (1 << 0)) != 0)
     }
 
     /// 写入一个位（例如 "DB10.5.3" 或 "M1.2"）
@@ -295,9 +293,7 @@ impl S7Client {
     pub async fn write_bool(&self, address: &str, value: bool) -> Result<(), S7Error> {
         let req = RequestItem::parse_bit(address)
             .map_err(|e| S7Error::Error(format!("Address parse error: {}", e)))?;
-        let bit_index = req.bit_address;
-        let byte_value = if value { 1u8 << bit_index } else { 0u8 };
-        let data = DataItem::create_req_bytes(vec![byte_value])?;
+        let data = DataItem::create_req_bool(value)?;
         self.write(vec![req], vec![data]).await
     }
 
@@ -470,7 +466,6 @@ impl S7Client {
         self.read_wstring(address, 254).await
     }
 
-
     /// 写入西门子 STRING（Latin-1 编码，不支持中文）
     /// `max_len` 为 PLC 中声明的最大字符数。
     /// 若字符串长度超过 `max_len` 或包含无法编码的字符，返回错误。
@@ -534,7 +529,6 @@ impl S7Client {
         let data = DataItem::create_req_bytes(buf)?;
         self.write(vec![req], vec![data]).await
     }
-
 }
 
 /// 将 Rust 字符串转换为 Latin-1 (ISO-8859-1) 字节序列。
@@ -552,7 +546,6 @@ fn str_to_latin1(s: &str) -> Result<Vec<u8>, S7Error> {
     }
     Ok(bytes)
 }
-
 
 /// 后台 actor 的主循环，负责 TCP 通信与协议处理
 async fn run_actor(
@@ -693,7 +686,7 @@ async fn read_full_frame(stream: &mut TcpStream) -> Result<Vec<u8>, S7Error> {
 
 async fn read_s7_frame(stream: &mut TcpStream) -> Result<S7Data, S7Error> {
     let raw = read_full_frame(stream).await?;
-    debug!("response data: {}", bytes_to_hex(&raw));
+    info!("response data: {}", bytes_to_hex(&raw));
     S7Data::from_be_bytes(&raw)
         .map_err(|e| S7Error::Error(format!("Parse S7Data: {}", e)))?
         .ok_or_else(|| S7Error::Error("Not a valid S7 data".to_string()))
@@ -701,7 +694,7 @@ async fn read_s7_frame(stream: &mut TcpStream) -> Result<S7Data, S7Error> {
 
 /// 发送数据（带日志）
 async fn send_frame(stream: &mut TcpStream, data: &[u8], desc: &str) -> Result<(), S7Error> {
-    debug!("Send {}: {}", desc, bytes_to_hex(data));
+    info!("Send {}: {}", desc, bytes_to_hex(data));
     stream
         .write_all(data)
         .await
