@@ -1,12 +1,13 @@
 use crate::error::S7Error;
 use crate::item::RequestItem;
-use crate::types::{S7FunctionCode, SyntaxID};
+use crate::types::{S7ErrorClass, S7FunctionCode, S7MessageType, SyntaxID};
 use tokio_util::bytes::{Buf, BufMut, BytesMut};
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum S7Parameter {
     SetupParameter(SetupComParameter),
     ReadWriteParameter(ReadWriteParameter),
+    Szl(SzlParameter),
 }
 
 impl Default for S7Parameter {
@@ -116,7 +117,7 @@ impl ReadWriteParameter {
         self.item_count = self.request_items.len() as u8;
     }
 
-    pub fn byte_length(&self) -> u16 {
+    pub fn byte_len(&self) -> u16 {
         2 + self
             .request_items
             .iter()
@@ -132,7 +133,7 @@ impl Default for SetupComParameter {
             reserved: 0x00,
             max_amq_caller: 1,
             max_amq_callee: 1,
-            pdu_length: 240,
+            pdu_length: 960,
         }
     }
 }
@@ -153,13 +154,15 @@ impl S7Parameter {
         match self {
             S7Parameter::SetupParameter(p) => p.function_code,
             S7Parameter::ReadWriteParameter(p) => p.function_code,
+            S7Parameter::Szl(p) => p.function_code,
         }
     }
 
     pub fn byte_len(&self) -> usize {
         match self {
             S7Parameter::SetupParameter(_) => SetupComParameter::BYTE_LENGTH,
-            S7Parameter::ReadWriteParameter(p) => p.byte_length() as usize,
+            S7Parameter::ReadWriteParameter(p) => p.byte_len() as usize,
+            S7Parameter::Szl(p) => p.byte_len(),
         }
     }
 
@@ -175,12 +178,24 @@ impl S7Parameter {
                 buf.to_vec()
             }
             S7Parameter::ReadWriteParameter(p) => {
-                let mut buf = BytesMut::with_capacity(p.byte_length() as usize);
+                let mut buf = BytesMut::with_capacity(p.byte_len() as usize);
                 buf.put_u8(p.function_code.code());
                 buf.put_u8(p.item_count);
                 p.request_items.iter().for_each(|i| {
                     buf.extend_from_slice(&i.to_be_bytes());
                 });
+                buf.to_vec()
+            }
+            S7Parameter::Szl(p) => {
+                let mut buf = BytesMut::with_capacity(p.byte_len());
+                buf.put_u8(p.function_code.code());
+                buf.put_u8(p.item_count);
+                buf.put_u8(p.varspec);
+                buf.put_u8(p.plen);
+                buf.put_u8(p.syntax_id.code());
+                buf.put_u8(p.func_group);
+                buf.put_u8(p.sub_fun);
+                buf.put_u8(p.seq);
                 buf.to_vec()
             }
         }
@@ -189,8 +204,9 @@ impl S7Parameter {
     pub fn from_be_bytes(data: &[u8]) -> Result<Option<Self>, S7Error> {
         let mut buf = BytesMut::from(data);
         let func_code = data[0];
-        let function_code = S7FunctionCode::from(func_code)
-            .ok_or_else(|| S7Error::Error(format!("Unknown S7FunctionCode: 0x{:02X}", func_code)))?;
+        let function_code = S7FunctionCode::from(func_code).ok_or_else(|| {
+            S7Error::Error(format!("Unknown S7FunctionCode: 0x{:02X}", func_code))
+        })?;
         let s7_param = match function_code {
             S7FunctionCode::SetupCommunication => {
                 let _fc = buf.get_u8();
@@ -233,8 +249,109 @@ impl S7Parameter {
                     S7Parameter::ReadWriteParameter(rw)
                 }
             }
+            S7FunctionCode::CpuServices => {
+                let _fc = buf.get_u8();
+                let item_count = buf.get_u8();
+                let varspec = buf.get_u8();
+                let plen = buf.get_u8();
+                let syntax_id = buf.get_u8();
+                let func_group = buf.get_u8();
+                let sub_fun = buf.get_u8();
+                let seq = buf.get_u8();
+
+                let (data_unit_reference_number, last_data_unit, error_code) =
+                    if buf.remaining() >= 4 {
+                        (Some(buf.get_u8()), Some(buf.get_u8()), Some(buf.get_u16()))
+                    } else {
+                        (None, None, None)
+                    };
+                S7Parameter::Szl(SzlParameter {
+                    function_code,
+                    item_count,
+                    varspec,
+                    plen,
+                    syntax_id: SyntaxID::from(syntax_id).ok_or_else(|| {
+                        S7Error::Error(format!("Unknown SyntaxID: 0x{:02X}", syntax_id))
+                    })?,
+                    func_group,
+                    sub_fun,
+                    seq,
+                    data_unit_reference_number,
+                    last_data_unit,
+                    error_code,
+                })
+            }
             _ => return Ok(None),
         };
         Ok(Some(s7_param))
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct SzlParameter {
+    pub function_code: S7FunctionCode,
+    pub item_count: u8,
+    pub varspec: u8,
+    pub plen: u8,
+    pub syntax_id: SyntaxID,
+    pub func_group: u8,
+    pub sub_fun: u8,
+    pub seq: u8,
+    pub data_unit_reference_number: Option<u8>,
+    pub last_data_unit: Option<u8>,
+    pub error_code: Option<u16>,
+}
+
+impl SzlParameter {
+    pub fn byte_len(&self) -> usize {
+        if let (Some(_data_unit_reference_number), Some(_last_data_unit), Some(_ecd)) = (
+            self.data_unit_reference_number,
+            self.last_data_unit,
+            self.error_code,
+        ) {
+            12
+        } else {
+            8
+        }
+    }
+
+    pub fn to_be_bytes(&self) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        buf.put_u8(self.function_code.code());
+        buf.put_u8(self.item_count);
+        buf.put_u8(self.varspec);
+        buf.put_u8(self.plen);
+        buf.put_u8(self.syntax_id.code());
+        buf.put_u8(self.func_group);
+        buf.put_u8(self.sub_fun);
+        buf.put_u8(self.seq);
+        if let (Some(data_unit_reference_number), Some(last_data_unit), Some(ecd)) = (
+            self.data_unit_reference_number,
+            self.last_data_unit,
+            self.error_code,
+        ) {
+            buf.put_u8(data_unit_reference_number);
+            buf.put_u8(last_data_unit);
+            buf.put_u16(ecd);
+        }
+        buf.to_vec()
+    }
+}
+
+impl Default for SzlParameter {
+    fn default() -> SzlParameter {
+        SzlParameter {
+            function_code: S7FunctionCode::CpuServices,
+            item_count: 0x01,
+            varspec: 0x12,
+            plen: 0x04,
+            syntax_id: SyntaxID::ParameterShort,
+            func_group: 0x44,
+            sub_fun: 0x01,
+            seq: 0x00,
+            data_unit_reference_number: None,
+            last_data_unit: None,
+            error_code: None,
+        }
     }
 }

@@ -1,5 +1,6 @@
 use env_logger::Builder;
 use log::LevelFilter;
+use tokio_s7::bytes_to_hex;
 use tokio_s7::client::{S7Client, S7Config};
 use tokio_s7::types::PlcType;
 
@@ -12,6 +13,7 @@ async fn main() {
 
     let config = S7Config::new("10.211.55.3")
         .with_plc_type(PlcType::S1200)
+        .with_rack_slot(0, 1)
         .with_port(102);
     let mut client = S7Client::new(config);
     client.connect().await.expect("连接失败");
@@ -28,10 +30,19 @@ async fn main() {
     // let result = client.read_wstring("DB2.STRING20", 50).await;
     // println!("{:#?}", result);
 
-    client.write_bool("DB2.X32.2", true).await;
-    let result = client.read_bool("DB2.X32.2").await;
-    println!("{:#?}", result);
+    // client.write_bool("DB2.X32.2", true).await;
+    // let result = client.read_bool("DB2.X32.2").await;
+    // println!("{:#?}", result);
 
+
+    let result =  client.get_order_code().await.unwrap();
+    println!("szl_read order_code: {:?}", result);
+
+    let result =  client.get_cpu_info().await.unwrap();
+    println!("szl_read cpu_info: {:?}", result);
+
+    let result =  client.get_communication_info().await.unwrap();
+    println!("szl_read communication_info: {:?}", result);
 
     // client.write_int16("DB2.W282", 1345).await;
     // let result = client.read_int16("DB2.W282").await;

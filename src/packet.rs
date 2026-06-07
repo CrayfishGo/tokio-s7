@@ -1,12 +1,12 @@
 use crate::cotp::Cotp::CotpData;
 use crate::cotp::{Cotp, CotpConnection};
-use crate::datum::{Datum, ReadWriteDatum};
+use crate::datum::{Datum, ReadWriteDatum, SzlDaum};
 use crate::error::S7Error;
 use crate::header::S7Header;
 use crate::item::{DataItem, RequestItem};
-use crate::paramter::{ReadWriteParameter, S7Parameter, SetupComParameter};
+use crate::paramter::{ReadWriteParameter, S7Parameter, SetupComParameter, SzlParameter};
 use crate::tpkt::TPKT;
-use crate::types::S7FunctionCode;
+use crate::types::{S7FunctionCode, S7MessageType};
 
 #[derive(Debug, Clone)]
 pub struct S7Data {
@@ -189,5 +189,17 @@ impl S7Data {
             }
         }
         self.tpkt.length = self.byte_len() as u16;
+    }
+
+    pub fn create_szl_request(szl_id: u16, szl_index: u16) -> Self {
+        let mut s7data = Self {
+            tpkt: Default::default(),
+            cotp: Some(CotpData(crate::cotp::CotpData::default())),
+            header: Some(S7Header::new(S7MessageType::UserData)),
+            parameter: Some(S7Parameter::Szl(SzlParameter::default())),
+            datum: Some(Datum::Szl(SzlDaum::new(szl_id, szl_index))),
+        };
+        s7data.self_check();
+        s7data
     }
 }

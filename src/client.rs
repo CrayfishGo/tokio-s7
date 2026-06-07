@@ -1,15 +1,17 @@
+use crate::bytes_to_hex;
+use crate::datum::Datum;
 use crate::error::S7Error;
-use crate::header::S7Header;
 use crate::item::{DataItem, RequestItem};
 use crate::packet::S7Data;
 use crate::paramter::S7Parameter;
-use crate::types::{PduType, PlcType, S7ErrorClass};
-use log::{debug, error, info, warn};
+use crate::types::{CommunicationInfo, CpuInfo, OrderCode, PduType, PlcType, S7ErrorClass};
+use log::{error, info, warn};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::bytes::{Buf, BytesMut};
 
 /// S7 connection configuration
 #[derive(Debug, Clone)]
@@ -42,7 +44,7 @@ impl Default for S7Config {
             rack: 0,
             slot: 2,
             timeout_ms: 5000,
-            max_pdu_size: 480,
+            max_pdu_size: 960,
         }
     }
 }
@@ -116,6 +118,11 @@ pub enum Command {
         data: Vec<DataItem>,
         reply: oneshot::Sender<Result<(), S7Error>>,
     },
+    ReadSzl {
+        szl_id: u16,
+        szl_index: u16,
+        reply: oneshot::Sender<Result<S7Data, S7Error>>,
+    },
     Disconnect,
 }
 
@@ -130,7 +137,7 @@ pub struct S7Client {
 impl S7Client {
     pub fn new(config: S7Config) -> Self {
         Self {
-            pdu_length: 240,
+            pdu_length: config.max_pdu_size,
             connection_state: ConnectionState::Disconnected,
             config,
             cmd_tx: None,
@@ -529,6 +536,443 @@ impl S7Client {
         let data = DataItem::create_req_bytes(buf)?;
         self.write(vec![req], vec![data]).await
     }
+
+    pub async fn szl_read(&self, szl_id: u16, szl_index: u16) -> Result<S7Data, S7Error> {
+        let tx = self
+            .cmd_tx
+            .as_ref()
+            .ok_or_else(|| S7Error::Error("Not connected".into()))?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(Command::ReadSzl {
+            szl_id,
+            szl_index,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| S7Error::Error("Actor disconnected".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| S7Error::Error("Actor dropped".into()))?
+    }
+
+    pub async fn get_order_code(&self) -> Result<OrderCode, S7Error> {
+        let resp_data = self.szl_read(0x0011, 0x0000).await?;
+        match resp_data.datum {
+            None => Err(S7Error::Error("Response has no any data".into()))?,
+            Some(d) => {
+                match d {
+                    Datum::Szl(s) => {
+                        let payload = s.all_data.unwrap();
+                        let n = payload.len();
+                        let (v1, v2, v3) = if n >= 3 {
+                            (payload[n - 3], payload[n - 2], payload[n - 1])
+                        } else {
+                            (0, 0, 0)
+                        };
+
+                        let szl_id = s.szl_id;
+                        let _szl_index = s.szl_index;
+                        let entry_len = s.partlist_byte_len.unwrap() as usize;
+                        let entry_count = s.partlist_count.unwrap() as usize;
+
+                        let mut buf = BytesMut::from(payload.as_slice());
+                        if szl_id == 0x0011 && entry_len >= 4 && entry_count > 0 {
+                            for _ in 0..entry_count {
+                                if buf.remaining() < entry_len {
+                                    break;
+                                }
+                                let entry_idx = buf.get_u16();
+                                let string_len = entry_len - 2;
+                                let raw = buf.copy_to_bytes(string_len);
+                                if entry_idx == 0x0001 {
+                                    let null_end =
+                                        raw.iter().position(|&x| x == 0).unwrap_or(string_len);
+                                    let code = String::from_utf8_lossy(&raw[..null_end])
+                                        .trim()
+                                        .to_string();
+                                    if !code.is_empty() {
+                                        return Ok(OrderCode { code, v1, v2, v3 });
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fallback: scan for "6ES"/"6AV"/"6GK" pattern anywhere in payload.
+                        let code = scan_ascii_fields(&payload, 10, 4)
+                            .into_iter()
+                            .find(|s| {
+                                let su = s.to_uppercase();
+                                (su.starts_with("6ES")
+                                    || su.starts_with("6AV")
+                                    || su.starts_with("6GK"))
+                                    && s.len() >= 10
+                                    && s.bytes().all(|c| c.is_ascii_graphic() || c == b' ')
+                            })
+                            .unwrap_or_default();
+                        Ok(OrderCode { code, v1, v2, v3 })
+                    }
+                    _ => Err(S7Error::Error("Datum is not Szl".into()))?,
+                }
+            }
+        }
+    }
+
+    pub async fn get_cpu_info(&self) -> Result<CpuInfo, S7Error> {
+        let resp_data = self.szl_read(0x001C, 0x0000).await?;
+        match resp_data.datum {
+            None => Err(S7Error::Error("Response has no any data".into()))?,
+            Some(d) => {
+                match d {
+                    Datum::Szl(s) => {
+                        let payload = s.all_data.unwrap();
+                        let szl_id = s.szl_id;
+                        let _szl_index = s.szl_index;
+                        let entry_len = s.partlist_byte_len.unwrap() as usize;
+                        let entry_count = s.partlist_count.unwrap() as usize;
+
+                        let mut buf = BytesMut::from(payload.as_slice());
+                        if szl_id == 0x001C && entry_len >= 4 && entry_count > 0 {
+                            let mut module_type = String::new();
+                            let mut serial_number = String::new();
+                            let mut as_name = String::new();
+                            let mut copyright = String::new();
+                            let mut module_name = String::new();
+                            let mut sn_mc = String::new();
+                            for _ in 0..entry_count {
+                                if buf.remaining() < entry_len {
+                                    break;
+                                }
+                                let entry_idx = buf.get_u16();
+                                let string_len = entry_len - 2;
+                                let raw = buf.copy_to_bytes(string_len);
+                                let null_end =
+                                    raw.iter().position(|&x| x == 0).unwrap_or(string_len);
+                                let val =
+                                    String::from_utf8_lossy(&raw[..null_end]).trim().to_string();
+
+                                match entry_idx {
+                                    0x0001 => {
+                                        if as_name.is_empty() {
+                                            as_name = val;
+                                        }
+                                    }
+                                    // 0x0002 is module type on S7-300, AS name on S7-1500 — only use if
+                                    // 0x0007 is absent (module_type_canonical will override below).
+                                    0x0002 => {
+                                        if module_name.is_empty() {
+                                            module_name = val;
+                                        }
+                                    }
+                                    0x0003 => {
+                                        if module_name.is_empty() {
+                                            module_name = val;
+                                        }
+                                    }
+                                    0x0004 => {
+                                        if copyright.is_empty() {
+                                            copyright = val;
+                                        }
+                                    }
+                                    0x0005 => {
+                                        if serial_number.is_empty() {
+                                            serial_number = val;
+                                        }
+                                    }
+                                    // 0x0007 is always the true module type name (both S7-300 and S7-1500)
+                                    0x0007 => {
+                                        if module_type.is_empty() {
+                                            module_type = val;
+                                        }
+                                    }
+                                    // 0x0008 is SMC memory card on S7-1500 — do not use for module_name
+                                    0x0008 => {
+                                        if sn_mc.is_empty() {
+                                            sn_mc = val;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            if module_name.is_empty() && !as_name.is_empty() {
+                                module_name = as_name.clone();
+                            }
+
+                            if !module_type.is_empty()
+                                || !serial_number.is_empty()
+                                || !as_name.is_empty()
+                            {
+                                return Ok(CpuInfo {
+                                    module_type,
+                                    serial_number,
+                                    as_name,
+                                    copyright,
+                                    module_name,
+                                });
+                            }
+                        }
+
+                        // S7-1500 and some firmware variants use a tagged sub-record format.
+                        // Fall back to scanning the raw payload for tagged string fields.
+                        let data = payload.as_ref();
+                        let (module_type, serial_number, as_name, copyright, module_name) =
+                            parse_sub_record_fields(data);
+
+                        if !module_type.is_empty() || !serial_number.is_empty() {
+                            return Ok(CpuInfo {
+                                module_type,
+                                serial_number,
+                                as_name,
+                                copyright,
+                                module_name,
+                            });
+                        }
+
+                        // Last-resort scan: extract printable strings and apply heuristics.
+                        let mut module_type = String::new();
+                        let mut serial_number = String::new();
+                        let mut as_name = String::new();
+                        let mut copyright = String::new();
+                        let mut module_name = String::new();
+
+                        let mut scan = 0;
+                        while scan < data.len() {
+                            if data[scan].is_ascii_graphic() || data[scan] == b' ' {
+                                let start = scan;
+                                while scan < data.len()
+                                    && (data[scan].is_ascii_graphic() || data[scan] == b' ')
+                                {
+                                    scan += 1;
+                                }
+                                let val = String::from_utf8_lossy(&data[start..scan])
+                                    .trim()
+                                    .to_string();
+                                if val.len() >= 3 {
+                                    let tag = if start >= 2 && data[start - 2] == 0x00 {
+                                        Some(data[start - 1])
+                                    } else {
+                                        None
+                                    };
+                                    let su = val.to_uppercase();
+                                    if su.contains("BOOT")
+                                        || su.starts_with("P B")
+                                        || su.starts_with("HBOOT")
+                                    {
+                                        // skip firmware label
+                                    } else if tag == Some(0x07) && module_type.is_empty() {
+                                        module_type = val;
+                                    } else if tag == Some(0x08) && module_name.is_empty() {
+                                        module_name = val;
+                                    } else if tag == Some(0x05) && as_name.is_empty() {
+                                        as_name = val;
+                                    } else if tag == Some(0x06) && copyright.is_empty() {
+                                        copyright = val;
+                                    } else if tag == Some(0x04) && serial_number.is_empty() {
+                                        serial_number = val;
+                                    } else if val.contains('-')
+                                        && val.chars().filter(|c| c.is_ascii_digit()).count() >= 4
+                                        && !val.starts_with("6ES7")
+                                        && serial_number.is_empty()
+                                    {
+                                        serial_number = val;
+                                    } else if su.contains("CPU")
+                                        && su.contains("PN")
+                                        && module_type.is_empty()
+                                    {
+                                        module_type = val;
+                                    } else if module_type.is_empty()
+                                        && val.len() >= 8
+                                        && !su.contains("MC_")
+                                    {
+                                        module_type = val;
+                                    }
+                                }
+                            } else {
+                                scan += 1;
+                            }
+                        }
+
+                        Ok(CpuInfo {
+                            module_type,
+                            serial_number,
+                            as_name,
+                            copyright,
+                            module_name,
+                        })
+                    }
+                    _ => Err(S7Error::Error("Datum is not Szl".into()))?,
+                }
+            }
+        }
+    }
+
+    pub async fn get_communication_info(&self) -> Result<CommunicationInfo, S7Error> {
+        let resp_data = self.szl_read(0x0131, 0x0001).await?;
+        match resp_data.datum {
+            None => Err(S7Error::Error("Response has no any data".into()))?,
+            Some(d) => {
+                match d {
+                    Datum::Szl(s) => {
+                        let payload = s.all_data.unwrap();
+
+                        let szl_id = s.szl_id;
+                        let _szl_index = s.szl_index;
+                        let entry_len = s.partlist_byte_len.unwrap() as usize;
+                        let entry_count = s.partlist_count.unwrap() as usize;
+
+                        let mut buf = BytesMut::from(payload.as_slice());
+                        if szl_id == 0x0131
+                            && entry_len >= 12
+                            && entry_count >= 1
+                            && buf.remaining() >= entry_len
+                        {
+                            let _entry_idx = buf.get_u16();
+                            let max_pdu_len = buf.get_u16() as u32;
+                            let max_connections = buf.get_u16() as u32;
+                            let max_mpi_rate = buf.get_u32();
+                            let max_bus_rate = buf.get_u32();
+                            return Ok(CommunicationInfo {
+                                max_pdu_len,
+                                max_connections,
+                                max_mpi_rate,
+                                max_bus_rate,
+                            });
+                        }
+
+                        // Fallback: scan for any parseable numeric data
+                        Ok(CommunicationInfo {
+                            max_pdu_len: 0,
+                            max_connections: 0,
+                            max_mpi_rate: 0,
+                            max_bus_rate: 0,
+                        })
+                    }
+                    _ => Err(S7Error::Error("Datum is not Szl".into()))?,
+                }
+            }
+        }
+    }
+}
+
+fn scan_ascii_fields(data: &[u8], max_count: usize, min_len: usize) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut i = 0;
+    while i < data.len() && fields.len() < max_count {
+        // Skip bytes that are not visible ASCII (0x20-0x7E)
+        if !data[i].is_ascii_graphic() && data[i] != b' ' {
+            i += 1;
+            continue;
+        }
+        // Collect a run of visible ASCII
+        let start = i;
+        while i < data.len() && (data[i].is_ascii_graphic() || data[i] == b' ') {
+            i += 1;
+        }
+        let s = String::from_utf8_lossy(&data[start..i]).trim().to_string();
+        if s.len() >= min_len {
+            fields.push(s);
+        }
+    }
+    fields
+}
+
+/// Parse the S7-300 sub-record format used in SZL 0x001C responses.
+///
+/// This format uses tagged records: `[00 <tag> <string>] ...` where
+/// known tags are:
+/// - 0x01: order code / module identification
+/// - 0x05: plant identification (AS name)
+/// - 0x06: serial number
+/// - 0x07: module type name
+/// - 0x08: module name
+fn parse_sub_record_fields(b: &[u8]) -> (String, String, String, String, String) {
+    let mut module_type = String::new();
+    let mut serial_number = String::new();
+    let mut as_name = String::new();
+    let mut copyright = String::new();
+    let mut module_name = String::new();
+
+    let mut i = 0;
+    while i + 2 < b.len() {
+        // Look for 00 <tag> pattern with a known sub-record tag (1..=8)
+        if b[i] == 0x00 && (1..=8).contains(&b[i + 1]) {
+            let tag = b[i + 1];
+            let start = i + 2;
+
+            // Find end of string: next 0x00 byte (including 00 C0)
+            let mut end = start;
+            while end < b.len() && b[end] != 0x00 {
+                end += 1;
+            }
+
+            let raw = &b[start..end];
+            let val = String::from_utf8_lossy(raw).trim().to_string();
+
+            // Skip empty and firmware-label values
+            let su = val.to_uppercase();
+            if !val.is_empty() && !su.contains("BOOT") && !su.starts_with("P B") {
+                match tag {
+                    0x01 => {
+                        // Tag 0x01 may be order code (starts with "6ES") or module type.
+                        if !val.starts_with("6ES") && module_type.is_empty() {
+                            module_type = val;
+                        }
+                    }
+                    0x05 => {
+                        if as_name.is_empty() {
+                            as_name = val;
+                        }
+                    }
+                    0x06 => {
+                        if serial_number.is_empty() {
+                            serial_number = val;
+                        }
+                    }
+                    0x07 => {
+                        if module_type.is_empty() {
+                            module_type = val;
+                        }
+                    }
+                    0x08 => {
+                        if module_name.is_empty() {
+                            module_name = val;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+
+    // Also scan for free-standing printable strings that look like copyright
+    // (e.g. "Boot Loader" appearing after the tagged records).
+    if copyright.is_empty() {
+        let mut scan = 0;
+        while scan < b.len() {
+            if b[scan].is_ascii_graphic() || b[scan] == b' ' {
+                let s = scan;
+                while scan < b.len() && (b[scan].is_ascii_graphic() || b[scan] == b' ') {
+                    scan += 1;
+                }
+                let val = String::from_utf8_lossy(&b[s..scan]).trim().to_string();
+                let su = val.to_uppercase();
+                if val.len() >= 3 {
+                    if su.contains("BOOT") || su.starts_with("P B") {
+                        copyright = val;
+                        break;
+                    }
+                }
+            } else {
+                scan += 1;
+            }
+        }
+    }
+
+    (module_type, serial_number, as_name, copyright, module_name)
 }
 
 /// 将 Rust 字符串转换为 Latin-1 (ISO-8859-1) 字节序列。
@@ -586,6 +1030,21 @@ async fn run_actor(
                         .await;
                 let _ = reply.send(res);
             }
+            Command::ReadSzl {
+                szl_id,
+                szl_index,
+                reply,
+            } => {
+                let res = handle_read_szl(
+                    &mut stream,
+                    negotiated_pdu,
+                    szl_id,
+                    szl_index,
+                    &next_pdu_ref,
+                )
+                .await;
+                let _ = reply.send(res);
+            }
             Command::Disconnect => break,
         }
     }
@@ -601,8 +1060,8 @@ async fn handle_read(
 ) -> Result<Vec<DataItem>, S7Error> {
     // 构造请求
     let mut req = S7Data::create_read_request(items);
-    if let Some(S7Header::ReqHeader(hdr)) = &mut req.header {
-        hdr.pdu_reference = next_ref.fetch_add(1, Ordering::Relaxed);
+    if let Some(h) = &mut req.header {
+        h.pdu_reference = next_ref.fetch_add(1, Ordering::Relaxed);
     }
 
     let bytes = req.to_be_bytes();
@@ -640,8 +1099,8 @@ async fn handle_write(
     data: Vec<DataItem>,
 ) -> Result<(), S7Error> {
     let mut req = S7Data::create_write_request(items, data);
-    if let Some(S7Header::ReqHeader(hdr)) = &mut req.header {
-        hdr.pdu_reference = next_ref.fetch_add(1, Ordering::Relaxed);
+    if let Some(h) = &mut req.header {
+        h.pdu_reference = next_ref.fetch_add(1, Ordering::Relaxed);
     }
 
     let bytes = req.to_be_bytes();
@@ -655,14 +1114,43 @@ async fn handle_write(
     Ok(())
 }
 
+async fn handle_read_szl(
+    stream: &mut TcpStream,
+    pdu_limit: u16,
+    szl_id: u16,
+    szl_index: u16,
+    next_ref: &AtomicU16,
+) -> Result<S7Data, S7Error> {
+    // 构造请求
+    let mut req = S7Data::create_szl_request(szl_id, szl_index);
+    if let Some(h) = &mut req.header {
+        h.pdu_reference = next_ref.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let bytes = req.to_be_bytes();
+    // 检查 PDU 长度（不含 TPKT/COTP 头）
+    if bytes.len() - 7 > pdu_limit as usize {
+        return Err(S7Error::Error("Read request exceeds PDU limit".into()));
+    }
+
+    send_frame(stream, &bytes, "ReadRequest").await?;
+    let resp = read_s7_frame(stream).await?;
+    check_response(&resp)?;
+    Ok(resp)
+}
+
 // ---------- 响应校验 ----------
 
 fn check_response(resp: &S7Data) -> Result<(), S7Error> {
-    if let Some(S7Header::AckHeader(ack)) = &resp.header {
-        if ack.error_class != S7ErrorClass::NoError {
+    if let Some(h) = &resp.header {
+        if h.error_class.is_some()
+            && h.error_code.is_some()
+            && h.error_class.unwrap() != S7ErrorClass::NoError
+        {
             return Err(S7Error::Error(format!(
                 "Response error: class={:?}, code={}",
-                ack.error_class, ack.error_code
+                h.error_class,
+                h.error_code.unwrap()
             )));
         }
     }
@@ -686,7 +1174,7 @@ async fn read_full_frame(stream: &mut TcpStream) -> Result<Vec<u8>, S7Error> {
 
 async fn read_s7_frame(stream: &mut TcpStream) -> Result<S7Data, S7Error> {
     let raw = read_full_frame(stream).await?;
-    info!("response data: {}", bytes_to_hex(&raw));
+    info!("response data:     {}", bytes_to_hex(&raw));
     S7Data::from_be_bytes(&raw)
         .map_err(|e| S7Error::Error(format!("Parse S7Data: {}", e)))?
         .ok_or_else(|| S7Error::Error("Not a valid S7 data".to_string()))
@@ -694,7 +1182,7 @@ async fn read_s7_frame(stream: &mut TcpStream) -> Result<S7Data, S7Error> {
 
 /// 发送数据（带日志）
 async fn send_frame(stream: &mut TcpStream, data: &[u8], desc: &str) -> Result<(), S7Error> {
-    info!("Send {}: {}", desc, bytes_to_hex(data));
+    info!("Send {}:  {}", desc, bytes_to_hex(data));
     stream
         .write_all(data)
         .await
@@ -748,15 +1236,20 @@ async fn handshake(
     }
 
     // 检查头部错误
-    if let Some(S7Header::AckHeader(ack)) = &setup_resp.header {
-        if ack.error_class != S7ErrorClass::NoError {
+    if let Some(h) = &setup_resp.header {
+        if h.error_class.is_some()
+            && h.error_code.is_some()
+            && h.error_class.unwrap() != S7ErrorClass::NoError
+        {
             error!(
                 "Setup 响应错误: {:?} code={}",
-                ack.error_class, ack.error_code
+                h.error_class,
+                h.error_code.unwrap()
             );
             return Err(S7Error::Error(format!(
                 "Setup failed: class={:?}, code={}",
-                ack.error_class, ack.error_code
+                h.error_class,
+                h.error_code.unwrap()
             )));
         }
     } else {
@@ -783,12 +1276,4 @@ async fn handshake(
     };
 
     Ok(negotiated_pdu)
-}
-
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{:02X}", b))
-        .collect::<Vec<_>>()
-        .join(" ")
 }

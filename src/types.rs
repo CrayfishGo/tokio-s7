@@ -541,6 +541,10 @@ impl S7ReturnCode {
 pub enum SyntaxID {
     /// Address data S7-Any pointer-like DB1.DBX10.2
     S7Any = 0x10,
+
+    ParameterShort = 0x11,
+
+    ParameterExtended = 0x12,
     /// R_ID for PBC
     PbcRId = 0x13,
     /// Alarm lock/free dataset
@@ -573,6 +577,8 @@ impl SyntaxID {
     pub fn from(code: u8) -> Option<Self> {
         match code {
             0x10 => Some(SyntaxID::S7Any),
+            0x11 => Some(SyntaxID::ParameterShort),
+            0x12 => Some(SyntaxID::ParameterExtended),
             0x13 => Some(SyntaxID::PbcRId),
             0x15 => Some(SyntaxID::AlarmLockfree),
             0x16 => Some(SyntaxID::AlarmInd),
@@ -587,6 +593,47 @@ impl SyntaxID {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct OrderCode {
+    /// The order number (e.g. `"6ES7 315-2EH14-0AB0"`).
+    pub code: String,
+    /// Firmware version major component.
+    pub v1: u8,
+    /// Firmware version minor component.
+    pub v2: u8,
+    /// Firmware version patch component.
+    pub v3: u8,
+}
+
+
+#[derive(Debug, Clone)]
+pub struct CpuInfo {
+    /// Module type name (e.g. `"CPU 317-2 PN/DP"`).
+    pub module_type: String,
+    /// CPU serial number.
+    pub serial_number: String,
+    /// Plant identification (AS name).
+    pub as_name: String,
+    /// Copyright notice.
+    pub copyright: String,
+    /// Module name.
+    pub module_name: String,
+
+}
+
+#[derive(Debug, Clone)]
+pub struct CommunicationInfo {
+    /// Maximum PDU byte length.
+    pub max_pdu_len: u32,
+    /// Maximum number of connections.
+    pub max_connections: u32,
+    /// Maximum MPI baud rate.
+    pub max_mpi_rate: u32,
+    /// Maximum bus baud rate.
+    pub max_bus_rate: u32,
+}
+
 
 #[cfg(test)]
 mod tests {

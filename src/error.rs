@@ -58,6 +58,9 @@ pub enum S7Error {
         actual: usize,
     },
 
+    #[error("buffer too short: need {need} bytes, have {have}")]
+    BufferTooShort { need: usize, have: usize },
+
     #[error("Error: {0}")]
     Error(String),
 }
