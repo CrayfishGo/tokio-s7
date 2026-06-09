@@ -16,6 +16,7 @@ async fn main() {
     let config = S7Config::new("10.211.55.3")
         .with_plc_type(PlcType::S1200)
         .with_rack_slot(0, 1)
+        .with_auto_reconnect(true)
         .with_port(102);
     let mut client = S7Client::new(config);
     client.connect().await.expect("连接失败");

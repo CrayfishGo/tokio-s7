@@ -36,6 +36,8 @@ pub struct S7Config {
     pub timeout_ms: u64,
     /// Maximum PDU size
     pub max_pdu_size: u16,
+
+    pub auto_reconnect: bool,
 }
 
 impl Default for S7Config {
@@ -49,6 +51,7 @@ impl Default for S7Config {
             slot: 2,
             timeout_ms: 5000,
             max_pdu_size: 960,
+            auto_reconnect: false,
         }
     }
 }
@@ -92,6 +95,11 @@ impl S7Config {
     /// Set timeout
     pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
         self.timeout_ms = timeout_ms;
+        self
+    }
+
+    pub fn with_auto_reconnect(mut self, auto_reconnect: bool) -> Self {
+        self.auto_reconnect = auto_reconnect;
         self
     }
 }
@@ -1108,6 +1116,9 @@ async fn run_actor(
                     return;
                 }
                 // 重连时地址错误则等待重试
+                if !config.auto_reconnect {
+                    return;                 // 禁止重连，结束
+                }
                 sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -1129,6 +1140,9 @@ async fn run_actor(
                     return;
                 }
                 warn!("Reconnect failed, retrying...");
+                if !config.auto_reconnect {
+                    return;                 // 禁止重连，结束
+                }
                 sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -1166,6 +1180,9 @@ async fn run_actor(
                 }
                 Err(e) => {
                     warn!("Reconnect handshake failed: {}", e);
+                    if !config.auto_reconnect {
+                        return;                 // 禁止重连，结束
+                    }
                     sleep(Duration::from_secs(2)).await;
                     continue;
                 }
@@ -1175,6 +1192,9 @@ async fn run_actor(
         // ---------- 4. 进入命令处理循环 ----------
         if let Err(e) = serve_commands(stream, pdu_length, &mut cmd_rx).await {
             info!("Connection lost: {}, reconnecting...", e);
+            if !config.auto_reconnect {
+                return;                 // 禁止重连，结束
+            }
             sleep(Duration::from_secs(2)).await;
         }
     }
