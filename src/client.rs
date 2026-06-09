@@ -4,14 +4,18 @@ use crate::error::S7Error;
 use crate::item::{DataItem, RequestItem};
 use crate::packet::S7Data;
 use crate::paramter::S7Parameter;
-use crate::types::{CommunicationInfo, CpuInfo, OrderCode, PduType, PlcType, S7ErrorClass};
+use crate::types::{
+    CommunicationInfo, CpuInfo, OrderCode, PduType, PlcStatus, PlcType, S7ErrorClass,
+};
 use log::{error, info, warn};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
-use tokio_util::bytes::{Buf, BytesMut};
+use tokio::time::sleep;
+use tokio_util::bytes::{Buf, BufMut, BytesMut};
 
 /// S7 connection configuration
 #[derive(Debug, Clone)]
@@ -145,55 +149,15 @@ impl S7Client {
     }
 
     pub async fn connect(&mut self) -> Result<(), S7Error> {
-        let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
-            .parse()
-            .map_err(|_| S7Error::ConnectionRefused {
-                host: self.config.host.clone(),
-                port: self.config.port,
-            })?;
-
-        info!(
-            "Connecting to S7 PLC at {}:{}",
-            self.config.host, self.config.port
-        );
-
-        let stream = tokio::time::timeout(
-            std::time::Duration::from_millis(self.config.timeout_ms),
-            TcpStream::connect(&addr),
-        )
-        .await
-        .map_err(|_| S7Error::ConnectionTimeout {
-            host: self.config.host.clone(),
-            port: self.config.port,
-        })?
-        .map_err(|_| S7Error::ConnectionRefused {
-            host: self.config.host.clone(),
-            port: self.config.port,
-        })?;
-
-        self.connection_state = ConnectionState::Connected;
-
         // 通道：用于接收握手结果（协商后的 PDU 长度）
         let (result_tx, result_rx) = oneshot::channel();
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         self.cmd_tx = Some(cmd_tx);
 
-        let (local, remote) = match self.config.plc_type {
-            PlcType::S200 => (0x4D57, 0x4D57),
-            PlcType::S200Smart => (0x1000, 0x3000),
-            PlcType::Sinumerik828D => (0x0400, 0x0D04),
-            _ => (
-                0x0100,
-                0x0300 + (0x20 * self.config.rack + self.config.slot) as u16,
-            ),
-        };
-
         // 启动后台 Actor
         tokio::spawn(run_actor(
-            stream,
-            local,
-            remote,
-            self.pdu_length, // 建议的 PDU 长度
+            self.config.clone(),
+            self.pdu_length,
             cmd_rx,
             result_tx,
         ));
@@ -852,6 +816,41 @@ impl S7Client {
             }
         }
     }
+
+    pub async fn get_plc_status(&self) -> Result<PlcStatus, S7Error> {
+        let resp_data = self.szl_read(0x0424, 0x0000).await?;
+        match resp_data.datum {
+            None => Err(S7Error::Error("Response has no any data".into()))?,
+            Some(d) => {
+                match d {
+                    Datum::Szl(s) => {
+                        let payload = s.all_data.unwrap();
+
+                        let szl_id = s.szl_id;
+                        let _szl_index = s.szl_index;
+
+                        if szl_id == 0x0424 {
+                            // payload[0..1]: ereig
+                            // payload[2]: ae
+                            // payload[3]: bzu-id requested model: Run, Stop ...
+                            let status_byte = payload[3];
+                            return match status_byte {
+                                0x00 => Ok(PlcStatus::Unknown),
+                                0x04 => Ok(PlcStatus::Stop),
+                                0x08 => Ok(PlcStatus::Run),
+                                // Old CPUs sometimes encode STOP as 0x03
+                                0x03 => Ok(PlcStatus::Stop),
+                                _ => Ok(PlcStatus::Stop),
+                            };
+                        }
+                        // Fallback: scan for any parseable numeric data
+                        Ok(PlcStatus::Unknown)
+                    }
+                    _ => Err(S7Error::Error("Datum is not Szl".into()))?,
+                }
+            }
+        }
+    }
 }
 
 fn scan_ascii_fields(data: &[u8], max_count: usize, min_len: usize) -> Vec<String> {
@@ -990,45 +989,238 @@ fn str_to_latin1(s: &str) -> Result<Vec<u8>, S7Error> {
     }
     Ok(bytes)
 }
+//
+// /// 后台 actor 的主循环，负责 TCP 通信与协议处理
+// async fn run_actor(
+//     config: S7Config,
+//     pdu_length: u16,
+//     mut cmd_rx: mpsc::Receiver<Command>,
+//     result_tx: oneshot::Sender<Result<u16, S7Error>>,
+// ) {
+//     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
+//         .parse()
+//         .map_err(|_| S7Error::ConnectionRefused {
+//             host: config.host.clone(),
+//             port: config.port,
+//         })?;
+//
+//     info!("Connecting to S7 PLC at {}:{}", config.host, config.port);
+//
+//     let stream = tokio::time::timeout(
+//         std::time::Duration::from_millis(config.timeout_ms),
+//         TcpStream::connect(&addr),
+//     )
+//     .await
+//     .map_err(|_| S7Error::ConnectionTimeout {
+//         host: config.host.clone(),
+//         port: config.port,
+//     })?
+//     .map_err(|_| S7Error::ConnectionRefused {
+//         host: config.host.clone(),
+//         port: config.port,
+//     })?;
+//
+//     self.connection_state = ConnectionState::Connected;
+//
+//     let negotiated_pdu = match handshake(&mut stream, local, remote, pdu_length).await {
+//         Ok(v) => {
+//             let _ = result_tx.send(Ok(v));
+//             v
+//         }
+//         Err(e) => {
+//             println!("Handshake failed: {}", e);
+//             let _ = result_tx.send(Err(e));
+//             return;
+//         }
+//     };
+//
+//     let mut decoder = FrameDecoder::new();
+//     let next_pdu_ref = AtomicU16::new(0);
+//
+//     while let Some(cmd) = cmd_rx.recv().await {
+//         match cmd {
+//             Command::Read { mut items, reply } => {
+//                 let res = handle_read(
+//                     &mut stream,
+//                     &mut decoder,
+//                     negotiated_pdu,
+//                     &next_pdu_ref,
+//                     &mut items,
+//                 )
+//                 .await;
+//                 let _ = reply.send(res);
+//             }
+//             Command::Write {
+//                 mut items,
+//                 data,
+//                 reply,
+//             } => {
+//                 let res = handle_write(
+//                     &mut stream,
+//                     &mut decoder,
+//                     negotiated_pdu,
+//                     &next_pdu_ref,
+//                     &mut items,
+//                     data,
+//                 )
+//                 .await;
+//                 let _ = reply.send(res);
+//             }
+//             Command::ReadSzl {
+//                 szl_id,
+//                 szl_index,
+//                 reply,
+//             } => {
+//                 let res = handle_read_szl(
+//                     &mut stream,
+//                     &mut decoder,
+//                     negotiated_pdu,
+//                     szl_id,
+//                     szl_index,
+//                     &next_pdu_ref,
+//                 )
+//                 .await;
+//                 let _ = reply.send(res);
+//             }
+//             Command::Disconnect => break,
+//         }
+//     }
+// }
 
-/// 后台 actor 的主循环，负责 TCP 通信与协议处理
 async fn run_actor(
-    mut stream: TcpStream,
-    local: u16,
-    remote: u16,
-    pdu_length: u16,
+    config: S7Config,
+    initial_pdu: u16,
     mut cmd_rx: mpsc::Receiver<Command>,
-    result_tx: oneshot::Sender<Result<u16, S7Error>>,
+    result_tx: oneshot::Sender<Result<u16, S7Error>>, // 原始参数
 ) {
-    let negotiated_pdu = match handshake(&mut stream, local, remote, pdu_length).await {
-        Ok(v) => {
-            let _ = result_tx.send(Ok(v));
-            v
-        }
-        Err(e) => {
-            println!("Handshake failed: {}", e);
-            let _ = result_tx.send(Err(e));
-            return;
-        }
-    };
+    // 包装为 Option，方便安全取出
+    let mut result_tx = Some(result_tx);
+    let mut pdu_length = initial_pdu;
 
+    loop {
+        // ---------- 1. 建立 TCP 连接 ----------
+        let addr: SocketAddr = match format!("{}:{}", config.host, config.port).parse() {
+            Ok(a) => a,
+            Err(e) => {
+                // 如果首次连接，必须报告错误
+                if let Some(tx) = result_tx.take() {
+                    let _ = tx.send(Err(S7Error::Error(format!("Invalid address: {}", e))));
+                    return;
+                }
+                // 重连时地址错误则等待重试
+                sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let mut stream = match tokio::time::timeout(
+            Duration::from_millis(config.timeout_ms),
+            TcpStream::connect(&addr),
+        )
+        .await
+        {
+            Ok(Ok(s)) => s,
+            _ => {
+                if let Some(tx) = result_tx.take() {
+                    let _ = tx.send(Err(S7Error::ConnectionRefused {
+                        host: config.host.clone(),
+                        port: config.port,
+                    }));
+                    return;
+                }
+                warn!("Reconnect failed, retrying...");
+                sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let (local, remote) = match config.plc_type {
+            PlcType::S200 => (0x4D57, 0x4D57),
+            PlcType::S200Smart => (0x1000, 0x3000),
+            PlcType::Sinumerik828D => (0x0400, 0x0D04),
+            _ => (0x0100, 0x0300 + (0x20 * config.rack + config.slot) as u16),
+        };
+
+        // ---------- 2. 握手 ----------
+        let handshake_result = handshake(&mut stream, local, remote, pdu_length).await;
+
+        // ---------- 3. 处理结果（首次连接 vs 重连）----------
+        if let Some(tx) = result_tx.take() {
+            // 首次连接：必须通知调用者
+            match handshake_result {
+                Ok(p) => {
+                    pdu_length = p;
+                    let _ = tx.send(Ok(p));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                    return; // 首次失败，终止 actor
+                }
+            }
+        } else {
+            // 重连
+            match handshake_result {
+                Ok(p) => {
+                    pdu_length = p;
+                    info!("Reconnected, PDU length: {}", p);
+                }
+                Err(e) => {
+                    warn!("Reconnect handshake failed: {}", e);
+                    sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            }
+        }
+
+        // ---------- 4. 进入命令处理循环 ----------
+        if let Err(e) = serve_commands(stream, pdu_length, &mut cmd_rx).await {
+            info!("Connection lost: {}, reconnecting...", e);
+            sleep(Duration::from_secs(2)).await;
+        }
+    }
+}
+
+async fn serve_commands(
+    mut stream: TcpStream,
+    pdu_limit: u16,
+    cmd_rx: &mut mpsc::Receiver<Command>,
+) -> Result<(), S7Error> {
+    let mut decoder = FrameDecoder::new();
     let next_pdu_ref = AtomicU16::new(0);
-
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             Command::Read { mut items, reply } => {
-                let res = handle_read(&mut stream, negotiated_pdu, &next_pdu_ref, &mut items).await;
-                let _ = reply.send(res);
+                let res = handle_read(
+                    &mut stream,
+                    &mut decoder,
+                    pdu_limit,
+                    &next_pdu_ref,
+                    &mut items,
+                )
+                .await;
+                let _ = reply.send(res.clone());
+                if res.is_err() {
+                    return Err(res.unwrap_err());
+                }
             }
             Command::Write {
                 mut items,
                 data,
                 reply,
             } => {
-                let res =
-                    handle_write(&mut stream, negotiated_pdu, &next_pdu_ref, &mut items, data)
-                        .await;
-                let _ = reply.send(res);
+                let res = handle_write(
+                    &mut stream,
+                    &mut decoder,
+                    pdu_limit,
+                    &next_pdu_ref,
+                    &mut items,
+                    data,
+                )
+                .await;
+                let _ = reply.send(res.clone());
+                if res.is_err() {
+                    return Err(res.unwrap_err());
+                }
             }
             Command::ReadSzl {
                 szl_id,
@@ -1037,23 +1229,29 @@ async fn run_actor(
             } => {
                 let res = handle_read_szl(
                     &mut stream,
-                    negotiated_pdu,
+                    &mut decoder,
+                    pdu_limit,
+                    &next_pdu_ref,
                     szl_id,
                     szl_index,
-                    &next_pdu_ref,
                 )
                 .await;
-                let _ = reply.send(res);
+                let _ = reply.send(res.clone());
+                if res.is_err() {
+                    return Err(res.unwrap_err());
+                }
             }
-            Command::Disconnect => break,
+            Command::Disconnect => return Err(S7Error::ConnectionClosed),
         }
     }
+    Ok(())
 }
 
 // ---------- 读取处理 ----------
 
 async fn handle_read(
     stream: &mut TcpStream,
+    decoder: &mut FrameDecoder,
     pdu_limit: u16,
     next_ref: &AtomicU16,
     items: &mut Vec<RequestItem>,
@@ -1071,11 +1269,14 @@ async fn handle_read(
     }
 
     send_frame(stream, &bytes, "ReadRequest").await?;
-    let resp = read_s7_frame(stream).await?;
+    let raw = decoder.read_frame(stream).await?;
+    let resp = S7Data::from_be_bytes(&raw)
+        .map_err(|e| S7Error::Error(format!("Parse S7Data: {}", e)))?
+        .ok_or_else(|| S7Error::Error("Not a valid S7 data".to_string()))?;
     check_response(&resp)?;
 
     // 提取数据
-    if let Some(crate::datum::Datum::ReadWrite(datum)) = &resp.datum {
+    if let Some(Datum::ReadWrite(datum)) = &resp.datum {
         let mut data_items = Vec::new();
         for item in &datum.return_items {
             if let crate::item::S7ReturnItem::Data(di) = item {
@@ -1093,6 +1294,7 @@ async fn handle_read(
 // ---------- 写入处理 ----------
 async fn handle_write(
     stream: &mut TcpStream,
+    decoder: &mut FrameDecoder,
     pdu_limit: u16,
     next_ref: &AtomicU16,
     items: &mut Vec<RequestItem>,
@@ -1109,17 +1311,21 @@ async fn handle_write(
     }
 
     send_frame(stream, &bytes, "WriteRequest").await?;
-    let resp = read_s7_frame(stream).await?;
+    let raw = decoder.read_frame(stream).await?;
+    let resp = S7Data::from_be_bytes(&raw)
+        .map_err(|e| S7Error::Error(format!("Parse S7Data: {}", e)))?
+        .ok_or_else(|| S7Error::Error("Not a valid S7 data".to_string()))?;
     check_response(&resp)?;
     Ok(())
 }
 
 async fn handle_read_szl(
     stream: &mut TcpStream,
+    decoder: &mut FrameDecoder,
     pdu_limit: u16,
+    next_ref: &AtomicU16,
     szl_id: u16,
     szl_index: u16,
-    next_ref: &AtomicU16,
 ) -> Result<S7Data, S7Error> {
     // 构造请求
     let mut req = S7Data::create_szl_request(szl_id, szl_index);
@@ -1133,8 +1339,11 @@ async fn handle_read_szl(
         return Err(S7Error::Error("Read request exceeds PDU limit".into()));
     }
 
-    send_frame(stream, &bytes, "ReadRequest").await?;
-    let resp = read_s7_frame(stream).await?;
+    send_frame(stream, &bytes, "ReadSzlRequest").await?;
+    let raw = decoder.read_frame(stream).await?;
+    let resp = S7Data::from_be_bytes(&raw)
+        .map_err(|e| S7Error::Error(format!("Parse S7Data: {}", e)))?
+        .ok_or_else(|| S7Error::Error("Not a valid S7 data".to_string()))?;
     check_response(&resp)?;
     Ok(resp)
 }
@@ -1154,39 +1363,13 @@ fn check_response(resp: &S7Data) -> Result<(), S7Error> {
             )));
         }
     }
-    // 可增加 PDU reference 匹配检查
     Ok(())
-}
-
-/// 从流中读取一个完整的S7协议数据（根据帧头的长度字段）
-async fn read_full_frame(stream: &mut TcpStream) -> Result<Vec<u8>, S7Error> {
-    let mut header = [0u8; 4];
-    stream.read_exact(&mut header).await?;
-    let len = u16::from_be_bytes([header[2], header[3]]) as usize;
-    if len < 4 {
-        return Err(S7Error::Error("Invalid TPKT length".to_string()));
-    }
-    let mut buf = vec![0u8; len];
-    buf[..4].copy_from_slice(&header);
-    stream.read_exact(&mut buf[4..]).await?;
-    Ok(buf)
-}
-
-async fn read_s7_frame(stream: &mut TcpStream) -> Result<S7Data, S7Error> {
-    let raw = read_full_frame(stream).await?;
-    info!("response data:     {}", bytes_to_hex(&raw));
-    S7Data::from_be_bytes(&raw)
-        .map_err(|e| S7Error::Error(format!("Parse S7Data: {}", e)))?
-        .ok_or_else(|| S7Error::Error("Not a valid S7 data".to_string()))
 }
 
 /// 发送数据（带日志）
 async fn send_frame(stream: &mut TcpStream, data: &[u8], desc: &str) -> Result<(), S7Error> {
     info!("Send {}:  {}", desc, bytes_to_hex(data));
-    stream
-        .write_all(data)
-        .await
-        .map_err(|e| S7Error::IoErr(e))?;
+    stream.write_all(data).await?;
     Ok(())
 }
 
@@ -1196,15 +1379,17 @@ async fn handshake(
     remote: u16,
     pdu_length: u16,
 ) -> Result<u16, S7Error> {
+    let mut decoder = FrameDecoder::new();
     // ---------- COTP 连接 ----------
     let req = S7Data::create_cr_connection(local, remote);
     send_frame(stream, &req.to_be_bytes(), "COTP").await?;
 
-    let cotp_resp = read_s7_frame(stream).await?;
-    info!(
-        "Receive CTOP: {}",
-        bytes_to_hex(cotp_resp.to_be_bytes().as_ref())
-    );
+    let raw = decoder.read_frame(stream).await?;
+    let cotp_resp = S7Data::from_be_bytes(&raw)
+        .map_err(|e| S7Error::Error(format!("Parse S7Data: {}", e)))?
+        .ok_or_else(|| S7Error::Error("Not a valid S7 data".to_string()))?;
+    check_response(&cotp_resp)?;
+
     let cotp = cotp_resp
         .cotp
         .as_ref()
@@ -1220,11 +1405,11 @@ async fn handshake(
     let req = S7Data::create_setup_comm(pdu_length);
     send_frame(stream, &req.to_be_bytes(), "SetupComm").await?;
 
-    let setup_resp = read_s7_frame(stream).await?;
-    info!(
-        "Receive SetupComm: {}",
-        bytes_to_hex(setup_resp.to_be_bytes().as_ref())
-    );
+    let raw = decoder.read_frame(stream).await?;
+    let setup_resp = S7Data::from_be_bytes(&raw)
+        .map_err(|e| S7Error::Error(format!("Parse S7Data: {}", e)))?
+        .ok_or_else(|| S7Error::Error("Not a valid S7 data".to_string()))?;
+    check_response(&setup_resp)?;
     // 检查 COTP 类型
     let setup_cotp = setup_resp
         .cotp
@@ -1276,4 +1461,96 @@ async fn handshake(
     };
 
     Ok(negotiated_pdu)
+}
+
+pub struct FrameDecoder {
+    buffer: BytesMut,
+}
+
+impl FrameDecoder {
+    pub fn new() -> Self {
+        Self {
+            buffer: BytesMut::with_capacity(4096),
+        }
+    }
+
+    // /// 从流中读取一个完整的S7协议数据（根据帧头的长度字段）
+    // async fn read_full_frame(stream: &mut TcpStream) -> Result<Vec<u8>, S7Error> {
+    //     let mut header = [0u8; 4];
+    //     stream.read_exact(&mut header).await?;
+    //     let len = u16::from_be_bytes([header[2], header[3]]) as usize;
+    //     if len < 4 {
+    //         return Err(S7Error::Error("Invalid TPKT length".to_string()));
+    //     }
+    //     let mut buf = vec![0u8; len];
+    //     buf[..4].copy_from_slice(&header);
+    //     stream.read_exact(&mut buf[4..]).await?;
+    //     Ok(buf)
+    // }
+    //
+
+    /// 尝试从缓冲区中解码一帧（可能包含完整的 TPKT 头）
+    pub fn try_decode(&mut self) -> Option<Vec<u8>> {
+        if self.buffer.len() < 4 {
+            return None;
+        }
+
+        let (frame_len, has_tpkt) = if self.buffer[0] == 0x03 && self.buffer[1] == 0x00 {
+            let len = u16::from_be_bytes([self.buffer[2], self.buffer[3]]) as usize;
+            if len < 4 {
+                self.buffer.clear();
+                return None;
+            }
+            (len, true)
+        } else {
+            // 无 TPKT 头，首字节为 COTP 长度字段
+            let cotp_len = self.buffer[0] as usize;
+            (1 + cotp_len, false)
+        };
+
+        if self.buffer.len() < frame_len {
+            // 预留空间，等待更多数据
+            self.buffer.reserve(frame_len - self.buffer.len());
+            return None;
+        }
+
+        let raw = self.buffer.split_to(frame_len);
+        if !has_tpkt {
+            // 补全 TPKT 头，保证上层总是得到标准帧
+            let tpkt_len = 4 + raw.len();
+            let mut full = BytesMut::with_capacity(tpkt_len);
+            full.put_u8(0x03);
+            full.put_u8(0x00);
+            full.put_u16(tpkt_len as u16);
+            full.put(raw);
+            full.to_vec()
+        } else {
+            raw.to_vec()
+        }
+        .into()
+    }
+
+    /// 从流中读取数据到缓冲区，直到可以解码出一帧，然后返回该帧
+    pub async fn read_frame(&mut self, stream: &mut TcpStream) -> Result<Vec<u8>, S7Error> {
+        loop {
+            if let Some(frame) = self.try_decode() {
+                info!("response data:     {}", bytes_to_hex(frame.as_slice()));
+                return Ok(frame);
+            }
+            // 读取新数据
+            let mut tmp = [0u8; 1024];
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                return Err(S7Error::ConnectionClosed);
+            }
+            self.buffer.extend_from_slice(&tmp[..n]);
+        }
+    }
+
+    /// 清空缓冲区（连接重建时调用）
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+    }
+
+
 }

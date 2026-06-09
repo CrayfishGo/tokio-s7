@@ -634,6 +634,18 @@ pub struct CommunicationInfo {
     pub max_bus_rate: u32,
 }
 
+/// PLC run-time status returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlcStatus {
+    /// Status unknown or not available.
+    Unknown = 0x00,
+    /// PLC is in STOP mode.
+    Stop = 0x04,
+    /// PLC is in RUN mode.
+    Run = 0x08,
+}
+
+
 
 #[cfg(test)]
 mod tests {

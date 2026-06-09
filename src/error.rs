@@ -1,10 +1,11 @@
 use std::io;
+use std::sync::Arc;
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum S7Error {
     #[error(transparent)]
-    IoErr(#[from] io::Error),
+    IoErr(#[from] Arc<io::Error>),
 
     /// Connection refused
     #[error("Connection refused to {host}:{port}")]
@@ -80,12 +81,10 @@ impl S7Error {
 
 pub type Result<T> = std::result::Result<T, S7Error>;
 
-pub trait ToTpktError {
-    fn to_err(self) -> S7Error;
-}
 
-impl<T: ToTpktError> From<T> for S7Error {
-    fn from(value: T) -> Self {
-        value.to_err()
+// 从 io::Error 自动转换
+impl From<io::Error> for S7Error {
+    fn from(e: io::Error) -> Self {
+        S7Error::IoErr(Arc::new(e))
     }
 }
