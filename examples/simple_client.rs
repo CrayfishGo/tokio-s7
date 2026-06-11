@@ -47,9 +47,10 @@ async fn main() {
     println!("szl_read communication_info: {:?}", result);
 
     let result = client.get_plc_status().await.unwrap();
-    println!("szl_read communication_info: {:?}", result);
+    println!("szl_read plc_status: {:?}", result);
 
-    let result = client.read_int16("DB2.W282").await;
+    client.write_int16("DB2.6.0", 32).await;
+    let result = client.read_int16("DB2.6.0").await;
     println!("{:#?}", result);
 
 
