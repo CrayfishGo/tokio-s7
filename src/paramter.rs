@@ -1,6 +1,6 @@
 use crate::error::S7Error;
 use crate::item::RequestItem;
-use crate::types::{S7ErrorClass, S7FunctionCode, S7MessageType, SyntaxID};
+use crate::types::{S7FunctionCode, SyntaxID};
 use tokio_util::bytes::{Buf, BufMut, BytesMut};
 
 #[derive(Debug, Eq, PartialEq, Clone)]

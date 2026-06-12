@@ -49,7 +49,7 @@ async fn main() {
     let result = client.get_plc_status().await.unwrap();
     println!("szl_read plc_status: {:?}", result);
 
-    client.write_int16("DB2.6.0", 32).await;
+    let _res = client.write_int16("DB2.6.0", 32).await;
     let result = client.read_int16("DB2.6.0").await;
     println!("{:#?}", result);
 

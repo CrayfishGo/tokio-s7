@@ -1,3 +1,4 @@
+use crate::bytes_to_hex;
 use crate::cotp::Cotp::CotpData;
 use crate::cotp::{Cotp, CotpConnection};
 use crate::datum::{Datum, ReadWriteDatum, SzlDaum};
@@ -7,6 +8,9 @@ use crate::item::{DataItem, RequestItem};
 use crate::paramter::{ReadWriteParameter, S7Parameter, SetupComParameter, SzlParameter};
 use crate::tpkt::TPKT;
 use crate::types::{S7FunctionCode, S7MessageType};
+use log::info;
+use tokio_util::bytes::{BufMut, BytesMut};
+use tokio_util::codec::{Decoder, Encoder};
 
 #[derive(Debug, Clone)]
 pub struct S7Data {
@@ -201,5 +205,67 @@ impl S7Data {
         };
         s7data.self_check();
         s7data
+    }
+}
+
+pub struct S7DataCodec;
+
+impl Decoder for S7DataCodec {
+    type Item = BytesMut;
+    type Error = S7Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if src.len() < 4 {
+            // 不够 TPKT 头，等待更多数据
+            return Ok(None);
+        }
+
+        // 检查是否有 TPKT 头 (0x03 0x00)
+        let has_tpkt = src[0] == 0x03 && src[1] == 0x00;
+        let frame_len = if has_tpkt {
+            let len = u16::from_be_bytes([src[2], src[3]]) as usize;
+            if len < 4 {
+                return Err(S7Error::Error("Invalid TPKT length".to_string()));
+            }
+            len
+        } else {
+            // 无 TPKT 头（某些 PLC 可能不返回），首字节为 COTP 长度
+            let cotp_len = src[0] as usize;
+            1 + cotp_len // 总帧长 = 1 字节长度字段 + COTP 内容
+        };
+
+        if src.len() < frame_len {
+            // 预留更多空间，等待数据到达
+            src.reserve(frame_len - src.len());
+            return Ok(None);
+        }
+
+        // 切出整帧（如果缺失 TPKT 头则补全，保证上层总是收到标准帧）
+        let raw = src.split_to(frame_len);
+        let framed = if !has_tpkt {
+            // 补全 TPKT 头：版本 0x03，保留 0x00，总长 = 4 + 原始帧长
+            let tpkt_total = 4 + raw.len();
+            let mut full = BytesMut::with_capacity(tpkt_total);
+            full.put_u8(0x03);
+            full.put_u8(0x00);
+            full.put_u16(tpkt_total as u16);
+            full.put(raw);
+            full
+        } else {
+            raw
+        };
+        info!("read data: {}", bytes_to_hex(&framed));
+        Ok(Some(framed))
+    }
+}
+
+impl Encoder<Vec<u8>> for S7DataCodec {
+    type Error = S7Error;
+
+    fn encode(&mut self, data: Vec<u8>, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        dst.reserve(data.len());
+        dst.put_slice(&data);
+        info!("send data: {}", bytes_to_hex(&data));
+        Ok(())
     }
 }
