@@ -11,6 +11,7 @@ use log::{error, info, warn};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
@@ -135,7 +136,9 @@ pub enum Command {
         szl_index: u16,
         reply: oneshot::Sender<Result<S7Data, S7Error>>,
     },
-    Disconnect,
+    Disconnect {
+        reply: oneshot::Sender<Result<(), S7Error>>,
+    },
 }
 
 #[derive(Debug)]
@@ -154,6 +157,25 @@ impl S7Client {
             config,
             cmd_tx: None,
         }
+    }
+
+    /// 优雅断开与 PLC 的连接（发送 COTP DR，关闭 TCP），停止后台 actor。
+    pub async fn disconnect(&mut self) -> Result<(), S7Error> {
+        let tx = self
+            .cmd_tx
+            .as_ref()
+            .ok_or_else(|| S7Error::Error("Not connected".into()))?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(Command::Disconnect { reply: reply_tx })
+            .await
+            .map_err(|_| S7Error::Error("Actor disconnected".into()))?;
+        let result = reply_rx
+            .await
+            .map_err(|_| S7Error::Error("Actor dropped".into()))?;
+        // 标记状态为已断开，并清除发送端（actor 已退出）
+        self.connection_state = ConnectionState::Disconnected;
+        self.cmd_tx = None;
+        result
     }
 
     pub async fn connect(&mut self) -> Result<(), S7Error> {
@@ -1093,7 +1115,7 @@ async fn run_actor(
         }
 
         // ---------- 4. 进入命令处理循环 ----------
-        if let Err(e) = serve_commands(stream, pdu_length, &mut cmd_rx).await {
+        if let Err(e) = serve_commands(stream, pdu_length, local, remote,  &mut cmd_rx).await {
             info!("Connection lost: {}, reconnecting...", e);
             if !config.auto_reconnect {
                 return; // 禁止重连，结束
@@ -1106,6 +1128,8 @@ async fn run_actor(
 async fn serve_commands(
     mut stream: TcpStream,
     pdu_limit: u16,
+    local: u16,
+    remote: u16,
     cmd_rx: &mut mpsc::Receiver<Command>,
 ) -> Result<(), S7Error> {
     let next_pdu_ref = AtomicU16::new(0);
@@ -1142,7 +1166,26 @@ async fn serve_commands(
                     return Err(res.unwrap_err());
                 }
             }
-            Command::Disconnect => return Err(S7Error::ConnectionClosed),
+            Command::Disconnect { reply } => {
+                let mut req = S7Data::create_cr_disconnection(local, remote);
+                if let Some(h) = &mut req.header {
+                    h.pdu_reference = next_pdu_ref.fetch_add(1, Ordering::Relaxed);
+                }
+                let bytes = req.to_be_bytes();
+                if bytes.len() - 7 > pdu_limit as usize {
+                    return Err(S7Error::Error("Write request exceeds PDU limit".into()));
+                }
+                let mut framed = Framed::new(&mut stream, S7DataCodec);
+                framed.send(bytes).await?;
+                // 优雅关闭 TCP 流
+                if let Err(e) = stream.shutdown().await {
+                    warn!("Error shutting down TCP: {}", e);
+                }
+                // 通知调用者断开成功
+                let _ = reply.send(Ok(()));
+                // 正常返回，不再重连
+                return Ok(());
+            }
         }
     }
     Ok(())

@@ -162,6 +162,26 @@ impl CotpConnection {
             ..CotpConnection::default()
         }
     }
+
+    pub fn create_cr_disconnection(local: u16, remote: u16) -> CotpConnection {
+        Self {
+            source_tsap: local,
+            destination_tsap: remote,
+            length: 0x11,
+            pdu_type: PduType::DisconnectRequest,
+            destination_reference: 0x0000,
+            source_reference: 0x0001,
+            flags: 0x00,
+            parameter_code_tpdu_size: 0xC0,
+            parameter_length1: 0x01,
+            tpdu_size: 0x0A,
+            parameter_code_src_tsap: 0xC1,
+            parameter_length2: 0x02,
+            parameter_code_dst_tsap: 0xC2,
+            parameter_length3: 0x02,
+        }
+    }
+
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]

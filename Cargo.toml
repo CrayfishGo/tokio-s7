@@ -1,6 +1,6 @@
 [package]
 name = "tokio-s7"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 description = "A library that can be used to communicate with Siemens S7 family PLC devices"

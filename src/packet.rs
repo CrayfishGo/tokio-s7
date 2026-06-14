@@ -134,6 +134,20 @@ impl S7Data {
         s7data
     }
 
+    pub fn create_cr_disconnection(local: u16, remote: u16) -> Self {
+        let mut s7data = Self {
+            tpkt: Default::default(),
+            cotp: Some(Cotp::CotpConnection(CotpConnection::create_cr_disconnection(
+                local, remote,
+            ))),
+            header: None,
+            parameter: None,
+            datum: None,
+        };
+        s7data.self_check();
+        s7data
+    }
+
     pub fn create_setup_comm(pdu_len: u16) -> Self {
         let mut s7data = Self {
             tpkt: Default::default(),
