@@ -16,7 +16,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 use tokio_util::bytes::{Buf, BytesMut};
-use tokio_util::codec::{Framed};
+use tokio_util::codec::Framed;
 
 /// S7 connection configuration
 #[derive(Debug, Clone)]
@@ -1115,12 +1115,20 @@ async fn run_actor(
         }
 
         // ---------- 4. 进入命令处理循环 ----------
-        if let Err(e) = serve_commands(stream, pdu_length, local, remote,  &mut cmd_rx).await {
-            info!("Connection lost: {}, reconnecting...", e);
-            if !config.auto_reconnect {
-                return; // 禁止重连，结束
+        match serve_commands(stream, pdu_length, local, remote, &mut cmd_rx).await {
+            Ok(r) => {
+                if r == 0 {
+                    // 主动断开连接
+                    break;
+                }
             }
-            sleep(Duration::from_secs(2)).await;
+            Err(e) => {
+                info!("Connection lost: {}, reconnecting...", e);
+                if !config.auto_reconnect {
+                    return; // 禁止重连，结束
+                }
+                sleep(Duration::from_secs(2)).await;
+            }
         }
     }
 }
@@ -1131,7 +1139,7 @@ async fn serve_commands(
     local: u16,
     remote: u16,
     cmd_rx: &mut mpsc::Receiver<Command>,
-) -> Result<(), S7Error> {
+) -> Result<u8, S7Error> {
     let next_pdu_ref = AtomicU16::new(0);
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -1184,11 +1192,11 @@ async fn serve_commands(
                 // 通知调用者断开成功
                 let _ = reply.send(Ok(()));
                 // 正常返回，不再重连
-                return Ok(());
+                return Ok(0);
             }
         }
     }
-    Ok(())
+    Ok(1)
 }
 
 // ---------- 读取处理 ----------
@@ -1366,9 +1374,7 @@ async fn handshake(
     framed.send(req.to_be_bytes()).await?;
 
     match framed.next().await {
-        None => {
-            Err(S7Error::Error("setup error: connection closed".to_string()))
-        }
+        None => Err(S7Error::Error("setup error: connection closed".to_string())),
         Some(res) => {
             let raw = res?;
             let setup_resp = S7Data::from_be_bytes(&raw)
@@ -1427,7 +1433,5 @@ async fn handshake(
 
             Ok(negotiated_pdu)
         }
-
     }
-
 }
