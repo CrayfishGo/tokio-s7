@@ -310,6 +310,16 @@ impl S7Client {
         Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 
+    pub async fn read_int16_le(&self, address: &str) -> Result<i16, S7Error> {
+        let bytes = self.read_bytes(address, 2).await?;
+        Ok(i16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    pub async fn read_uint16_le(&self, address: &str) -> Result<u16, S7Error> {
+        let bytes = self.read_bytes(address, 2).await?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
     pub async fn write_int16(&self, address: &str, data: i16) -> Result<(), S7Error> {
         let bytes = data.to_be_bytes();
         let req_item = RequestItem::parse_byte(address, 2)?;
@@ -324,6 +334,16 @@ impl S7Client {
         self.write(vec![req_item], vec![data_item]).await
     }
 
+    pub async fn write_int16_le(&self, address: &str, value: i16) -> Result<(), S7Error> {
+        let bytes = value.to_le_bytes();
+        self.write_bytes(address, &bytes).await
+    }
+
+    pub async fn write_uint16_le(&self, address: &str, value: u16) -> Result<(), S7Error> {
+        let bytes = value.to_le_bytes();
+        self.write_bytes(address, &bytes).await
+    }
+
     // ---------- 32-bit signed/unsigned ----------
 
     pub async fn read_int32(&self, address: &str) -> Result<i32, S7Error> {
@@ -335,6 +355,16 @@ impl S7Client {
     pub async fn read_uint32(&self, address: &str) -> Result<u32, S7Error> {
         let bytes = self.read_bytes(address, 4).await?;
         Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    pub async fn read_int32_le(&self, address: &str) -> Result<i32, S7Error> {
+        let bytes = self.read_bytes(address, 4).await?;
+        Ok(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    pub async fn read_uint32_le(&self, address: &str) -> Result<u32, S7Error> {
+        let bytes = self.read_bytes(address, 4).await?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
     pub async fn write_int32(&self, address: &str, value: i32) -> Result<(), S7Error> {
@@ -351,6 +381,17 @@ impl S7Client {
         self.write(vec![req], vec![data]).await
     }
 
+    pub async fn write_int32_le(&self, address: &str, value: i32) -> Result<(), S7Error> {
+        let bytes = value.to_le_bytes();
+        self.write_bytes(address, &bytes).await
+    }
+
+    pub async fn write_uint32_le(&self, address: &str, value: u32) -> Result<(), S7Error> {
+        let bytes = value.to_le_bytes();
+        self.write_bytes(address, &bytes).await
+    }
+
+
     // ---------- 64-bit signed/unsigned ----------
 
     pub async fn read_int64(&self, address: &str) -> Result<i64, S7Error> {
@@ -363,6 +404,20 @@ impl S7Client {
     pub async fn read_uint64(&self, address: &str) -> Result<u64, S7Error> {
         let bytes = self.read_bytes(address, 8).await?;
         Ok(u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    pub async fn read_int64_le(&self, address: &str) -> Result<i64, S7Error> {
+        let bytes = self.read_bytes(address, 8).await?;
+        Ok(i64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    pub async fn read_uint64_le(&self, address: &str) -> Result<u64, S7Error> {
+        let bytes = self.read_bytes(address, 8).await?;
+        Ok(u64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
     }
@@ -381,6 +436,16 @@ impl S7Client {
         self.write(vec![req], vec![data]).await
     }
 
+    pub async fn write_int64_le(&self, address: &str, value: i64) -> Result<(), S7Error> {
+        let bytes = value.to_le_bytes();
+        self.write_bytes(address, &bytes).await
+    }
+
+    pub async fn write_uint64_le(&self, address: &str, value: u64) -> Result<(), S7Error> {
+        let bytes = value.to_le_bytes();
+        self.write_bytes(address, &bytes).await
+    }
+
     // ---------- Float (32-bit) / Double (64-bit) ----------
 
     pub async fn read_float32(&self, address: &str) -> Result<f32, S7Error> {
@@ -391,6 +456,18 @@ impl S7Client {
     pub async fn read_float64(&self, address: &str) -> Result<f64, S7Error> {
         let bytes = self.read_bytes(address, 8).await?;
         Ok(f64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    pub async fn read_float32_le(&self, address: &str) -> Result<f32, S7Error> {
+        let bytes = self.read_bytes(address, 4).await?;
+        Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    pub async fn read_float64_le(&self, address: &str) -> Result<f64, S7Error> {
+        let bytes = self.read_bytes(address, 8).await?;
+        Ok(f64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]))
     }
@@ -407,6 +484,16 @@ impl S7Client {
             .map_err(|e| S7Error::Error(format!("Address parse error: {}", e)))?;
         let data = DataItem::create_req_bytes(value.to_be_bytes().to_vec())?;
         self.write(vec![req], vec![data]).await
+    }
+
+    pub async fn write_float32_le(&self, address: &str, value: f32) -> Result<(), S7Error> {
+        let bytes = value.to_le_bytes();
+        self.write_bytes(address, &bytes).await
+    }
+
+    pub async fn write_float64_le(&self, address: &str, value: f64) -> Result<(), S7Error> {
+        let bytes = value.to_le_bytes();
+        self.write_bytes(address, &bytes).await
     }
 
     // ---------- STRING / WSTRING ----------

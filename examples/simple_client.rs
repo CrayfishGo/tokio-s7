@@ -1,10 +1,6 @@
 use env_logger::Builder;
 use log::LevelFilter;
-use std::time::Duration;
-use tokio::signal;
-use tokio::time::interval;
 use tokio_s7::client::{S7Client, S7Config};
-use tokio_s7::error::S7Error;
 use tokio_s7::types::PlcType;
 
 #[tokio::main]
@@ -54,7 +50,6 @@ async fn main() {
     let result = client.read_int16("DB2.6.0").await;
     println!("{:#?}", result);
 
-
     match client.disconnect().await {
         Ok(_) => {
             println!("disconnect ok")
@@ -64,17 +59,4 @@ async fn main() {
         }
     };
 
-
-    let mut ticker = interval(Duration::from_secs(5));
-    loop {
-        tokio::select! {
-            _ = signal::ctrl_c() => {
-                println!("Shutting down...");
-                break;
-            }
-            _ = ticker.tick() => {
-                 println!("wait disconnect")
-            }
-        }
-    }
 }

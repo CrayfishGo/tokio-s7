@@ -107,7 +107,7 @@ impl RequestItem {
         Self::parse(address, count, S7ParamVariableType::Byte)
     }
 
-    pub fn parse(
+    fn parse(
         address: &str,
         count: u16,
         variable_type: S7ParamVariableType,
