@@ -11,6 +11,7 @@ use log::{error, info, warn};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -19,7 +20,7 @@ use tokio_util::bytes::{Buf, BytesMut};
 use tokio_util::codec::Framed;
 
 /// S7 connection configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S7Config {
     /// Host address
     pub host: String,

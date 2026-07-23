@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// PLC 类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlcType {
     S200,
     S200Smart,
@@ -10,7 +12,7 @@ pub enum PlcType {
     Sinumerik828D,
 }
 
-impl PlcType{
+impl PlcType {
     pub fn default_rack_slot(&self) -> (u8, u8) {
         match self {
             Self::S200 => (0, 1),
@@ -27,7 +29,7 @@ impl PlcType{
     pub fn protocol_type(&self) -> u16 {
         match self {
             Self::S200 | Self::S200Smart => 0x01, // ISOTCP243
-            _ => 0x02, // ISOTCP
+            _ => 0x02,                            // ISOTCP
         }
     }
 
@@ -58,7 +60,6 @@ pub enum PduType {
 }
 
 impl PduType {
-
     pub fn code(self) -> u8 {
         self as u8
     }
@@ -124,7 +125,6 @@ pub enum S7Area {
 }
 
 impl S7Area {
-
     pub fn code(self) -> u8 {
         self as u8
     }
@@ -606,7 +606,6 @@ pub struct OrderCode {
     pub v3: u8,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct CpuInfo {
     /// Module type name (e.g. `"CPU 317-2 PN/DP"`).
@@ -619,7 +618,6 @@ pub struct CpuInfo {
     pub copyright: String,
     /// Module name.
     pub module_name: String,
-
 }
 
 #[derive(Debug, Clone)]
@@ -644,8 +642,6 @@ pub enum PlcStatus {
     /// PLC is in RUN mode.
     Run = 0x08,
 }
-
-
 
 #[cfg(test)]
 mod tests {
