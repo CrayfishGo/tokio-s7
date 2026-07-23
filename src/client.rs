@@ -22,6 +22,8 @@ use tokio_util::codec::Framed;
 /// S7 connection configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S7Config {
+
+    pub name: String,
     /// Host address
     pub host: String,
     /// Port (default 102)
@@ -45,6 +47,7 @@ pub struct S7Config {
 impl Default for S7Config {
     fn default() -> Self {
         Self {
+            name: "tokio-s7".to_string(),
             host: "127.0.0.1".to_string(),
             port: 102,
             plc_type: PlcType::S1200,
@@ -253,6 +256,11 @@ impl S7Client {
             .ok_or_else(|| S7Error::Error("read_byte: empty response".into()))
     }
 
+    pub async fn read_sbyte(&self, address: &str) -> Result<i8, S7Error> {
+        let byte = self.read_byte(address).await?;
+        Ok(byte as i8)
+    }
+
     pub async fn write_byte(&self, address: &str, data: u8) -> Result<(), S7Error> {
         let req_item = RequestItem::parse_byte(address, 1)?;
         let data_item = DataItem::create_req_bytes(vec![data])?;
@@ -267,6 +275,12 @@ impl S7Client {
             .next()
             .map(|item| item.data)
             .ok_or_else(|| S7Error::Error("read_bytes: no data item returned".into()))
+    }
+
+    /// 读取有符号字节数组（每个字节解释为 i8）
+    pub async fn read_sbytes(&self, address: &str, count: u16) -> Result<Vec<i8>, S7Error> {
+        let bytes = self.read_bytes(address, count).await?;
+        Ok(bytes.into_iter().map(|b| b as i8).collect())
     }
 
     pub async fn write_bytes(&self, address: &str, data: &[u8]) -> Result<(), S7Error> {
